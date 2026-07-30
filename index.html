@@ -1,0 +1,2784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard</title>
+
+    <!-- PWA -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#1F4E78">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Dashboard">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <link rel="icon" href="icons/icon-192.png">
+
+    <!--
+        Storage polyfill: the app was built for the Claude.ai artifact
+        `window.storage` API (cloud key/value store). That API does not
+        exist outside Claude.ai, so on GitHub Pages every save/load would
+        silently fail. This shim reproduces the same get/set contract
+        using the browser's localStorage, so all the app's existing
+        window.storage.get(...) / .set(...) calls keep working, fully
+        offline, with no server. Must load before the app's own script
+        runs (it's at the top of <head>, so it always does).
+    -->
+    <script>
+        (function () {
+            const PREFIX = 'dashboard-storage:';
+            function fullKey(key, shared) {
+                return PREFIX + (shared ? 'shared:' : 'private:') + key;
+            }
+            window.storage = {
+                async get(key, shared) {
+                    try {
+                        const raw = localStorage.getItem(fullKey(key, shared));
+                        if (raw === null) return null;
+                        return { key, value: raw, shared: !!shared };
+                    } catch (e) {
+                        console.error('storage.get failed', e);
+                        return null;
+                    }
+                },
+                async set(key, value, shared) {
+                    try {
+                        localStorage.setItem(fullKey(key, shared), value);
+                        return { key, value, shared: !!shared };
+                    } catch (e) {
+                        console.error('storage.set failed (likely storage quota exceeded)', e);
+                        return null;
+                    }
+                },
+                async delete(key, shared) {
+                    try {
+                        localStorage.removeItem(fullKey(key, shared));
+                        return { key, deleted: true, shared: !!shared };
+                    } catch (e) {
+                        console.error('storage.delete failed', e);
+                        return null;
+                    }
+                },
+                async list(prefix, shared) {
+                    try {
+                        const base = PREFIX + (shared ? 'shared:' : 'private:');
+                        const search = base + (prefix || '');
+                        const keys = [];
+                        for (let i = 0; i < localStorage.length; i++) {
+                            const k = localStorage.key(i);
+                            if (k && k.startsWith(search)) keys.push(k.slice(base.length));
+                        }
+                        return { keys, prefix: prefix || '', shared: !!shared };
+                    } catch (e) {
+                        console.error('storage.list failed', e);
+                        return null;
+                    }
+                }
+            };
+        })();
+    </script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            padding: 10px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        header {
+            background: linear-gradient(135deg, #1F4E78 0%, #2d5a96 100%);
+            color: white;
+            padding: 10px 15px;
+            text-align: center;
+        }
+
+        header h1 {
+            font-size: 18px;
+            margin-bottom: 2px;
+        }
+
+        .timestamp {
+            font-size: 10px;
+            opacity: 0.9;
+        }
+
+        .load-status {
+            font-size: 9px;
+            opacity: 0.8;
+            margin-top: 2px;
+        }
+
+        /* Date filter bar */
+        .filter-bar {
+            background: rgba(255,255,255,0.08);
+            padding: 8px 10px 4px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+            border-top: 1px solid rgba(255,255,255,0.2);
+            border-radius: 6px;
+        }
+
+        .filter-bar-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: nowrap;
+            width: 100%;
+        }
+
+        .filter-bar-row .filter-label {
+            flex-shrink: 0;
+        }
+
+        .filter-bar-row select {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .filter-bar .filter-label {
+            font-size: 11px;
+            font-weight: bold;
+            color: white;
+            margin-right: 2px;
+        }
+
+        .filter-bar select {
+            width: auto;
+            min-width: 140px;
+            padding: 5px 8px;
+            font-size: 11px;
+            font-weight: bold;
+            color: #1F4E78;
+            border: 1px solid #ccd6e6;
+        }
+
+        .custom-range {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .custom-range.active {
+            display: flex;
+        }
+
+        .custom-range input[type="date"] {
+            width: auto;
+            padding: 5px 6px;
+            border: 1px solid #ccd6e6;
+            border-radius: 5px;
+            font-size: 11px;
+        }
+
+        .custom-range button {
+            padding: 5px 12px;
+            font-size: 11px;
+        }
+
+        .filter-range-label {
+            font-size: 10px;
+            color: rgba(255,255,255,0.85);
+            width: 100%;
+            margin-top: 2px;
+        }
+
+        .tabs {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            background: #f5f5f5;
+            border-bottom: 2px solid #ddd;
+        }
+
+        .tab-button {
+            flex: 1;
+            min-width: 70px;
+            padding: 8px 4px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: bold;
+            color: #666;
+            transition: all 0.3s;
+            border-bottom: 3px solid transparent;
+        }
+
+        .tab-button:hover {
+            background: #eee;
+        }
+
+        .tab-button.active {
+            background: white;
+            color: #1F4E78;
+            border-bottom-color: #1F4E78;
+        }
+
+        .tab-content {
+            display: none;
+            padding: 30px;
+            animation: fadeIn 0.3s;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Sub-tabs (used inside Investment tab) */
+        .sub-tabs {
+            display: flex;
+            background: #eef1f7;
+            border-radius: 8px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            margin-bottom: 20px;
+            flex-wrap: nowrap;
+        }
+
+        .sub-tab-button {
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 10px 4px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            color: #555;
+            border-bottom: 3px solid transparent;
+            white-space: normal;
+            overflow-wrap: break-word;
+            text-align: center;
+            line-height: 1.2;
+        }
+
+        @media (max-width: 480px) {
+            .sub-tab-button {
+                font-size: 10.5px;
+                padding: 8px 2px;
+            }
+        }
+
+        .sub-tab-button:hover {
+            background: #dfe6f3;
+        }
+
+        .sub-tab-button.active {
+            background: white;
+            color: #1F4E78;
+            border-bottom-color: #764ba2;
+        }
+
+        .sub-tab-content {
+            display: none;
+            animation: fadeIn 0.3s;
+        }
+
+        .sub-tab-content.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        .card h3 {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-bottom: 10px;
+            font-weight: normal;
+        }
+
+        .card .value {
+            font-size: 28px;
+            font-weight: bold;
+        }
+
+        .card.positive { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
+        .card.negative { background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%); }
+
+        /* FD Dropdown Styles */
+        .fd-dropdown-container {
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+
+        .fd-dropdown-container label {
+            font-weight: bold;
+            color: #1F4E78;
+            font-size: 14px;
+            display: block;
+            margin-bottom: 10px;
+        }
+
+        .fd-dropdown-container select {
+            width: 100%;
+            max-width: 400px;
+            padding: 10px 12px;
+            font-size: 14px;
+            border: 2px solid #1F4E78;
+            border-radius: 5px;
+            background: white;
+            color: #333;
+            cursor: pointer;
+        }
+
+        .fd-dropdown-container select:hover {
+            background: #f5f5f5;
+        }
+
+        .fd-dropdown-container select:focus {
+            outline: none;
+            border-color: #764ba2;
+            box-shadow: 0 0 5px rgba(118, 75, 162, 0.3);
+        }
+
+        .fd-details-panel {
+            background: #f9f9f9;
+            border-left: 4px solid #1F4E78;
+            border-radius: 5px;
+            padding: 15px;
+            margin-top: 15px;
+            display: none;
+        }
+
+        .fd-details-panel.active {
+            display: block;
+        }
+
+        .fd-detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .fd-detail-row:last-child {
+            border-bottom: none;
+        }
+
+        .fd-detail-label {
+            font-weight: bold;
+            color: #1F4E78;
+            min-width: 150px;
+        }
+
+        .fd-detail-value {
+            color: #333;
+            text-align: right;
+        }
+
+        .fd-table-container {
+            display: none;
+        }
+
+        /* Stats Dropdown */
+        .fd-stats-dropdown {
+            margin: 20px 0;
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+
+        .fd-stats-toggle {
+            width: 100%;
+            padding: 15px;
+            background: #1F4E78;
+            color: white;
+            border: none;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.3s ease;
+        }
+
+        .fd-stats-toggle:hover {
+            background: #2d5a96;
+        }
+
+        .fd-stats-toggle .toggle-icon {
+            font-size: 18px;
+            transition: transform 0.3s ease;
+        }
+
+        .fd-stats-toggle.active .toggle-icon {
+            transform: rotate(180deg);
+        }
+
+        .fd-stats-content {
+            display: none;
+            padding: 20px;
+            background: white;
+        }
+
+        .fd-stats-content.active {
+            display: block;
+        }
+
+        .fd-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .fd-stat-box {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 4px solid #1F4E78;
+        }
+
+        .fd-stat-box h4 {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+        }
+
+        .fd-stat-box .number {
+            font-size: 20px;
+            font-weight: bold;
+            color: #1F4E78;
+        }
+
+        #fd .stats-grid {
+            display: none;
+        }
+
+        .fd-alert-item {
+            background: #f9f9f9;
+            border-left: 4px solid #f7b733;
+            padding: 12px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+
+        /* Positional/Investment Holdings Dropdown */
+        .holdings-dropdown-container {
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+
+        .holdings-dropdown-container label {
+            font-weight: bold;
+            color: #1F4E78;
+            font-size: 14px;
+            display: block;
+            margin-bottom: 10px;
+        }
+
+        .holdings-dropdown-container select {
+            width: 100%;
+            max-width: 400px;
+            padding: 10px 12px;
+            font-size: 14px;
+            border: 2px solid #1F4E78;
+            border-radius: 5px;
+            background: white;
+            color: #333;
+            cursor: pointer;
+        }
+
+        .holdings-dropdown-container select:hover {
+            background: #f5f5f5;
+        }
+
+        .holdings-dropdown-container select:focus {
+            outline: none;
+            border-color: #764ba2;
+            box-shadow: 0 0 5px rgba(118, 75, 162, 0.3);
+        }
+
+        .holdings-details-panel {
+            background: #f9f9f9;
+            border-left: 4px solid #1F4E78;
+            border-radius: 5px;
+            padding: 15px;
+            margin-top: 15px;
+            display: none;
+        }
+
+        .holdings-details-panel.active {
+            display: block;
+        }
+
+        .holdings-detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .holdings-detail-row:last-child {
+            border-bottom: none;
+        }
+
+        .holdings-detail-label {
+            font-weight: bold;
+            color: #1F4E78;
+            min-width: 150px;
+        }
+
+        .holdings-detail-value {
+            color: #333;
+            text-align: right;
+        }
+
+        .holdings-table-container {
+            display: none;
+        }
+
+        #positional .holdings-table-container {
+            display: block;
+        }
+
+        #mutual .holdings-table-container {
+            display: block;
+        }
+
+        #positional > .table-container:nth-of-type(1) {
+            display: none !important;
+        }
+
+        #mutual > .table-container:nth-of-type(1) {
+            display: none !important;
+        }
+
+        #positional > .stats-grid {
+            display: none !important;
+        }
+
+        #mutual > .stats-grid {
+            display: none !important;
+        }
+
+        .stats-toggle-heading {
+            cursor: pointer;
+            user-select: none;
+            font-size: 16px;
+            font-weight: bold;
+            color: #1F4E78;
+            padding: 12px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 20px 0 10px 0;
+        }
+
+        .stats-toggle-heading:hover {
+            color: #764ba2;
+        }
+
+        .stats-toggle-icon {
+            display: inline-block;
+            font-size: 12px;
+            transition: transform 0.3s ease;
+        }
+
+        .stats-toggle-icon.active {
+            transform: rotate(90deg);
+        }
+
+        .stats-toggle-wrapper {
+            display: none;
+        }
+
+        .stats-toggle-wrapper.active {
+            display: grid;
+            gap: 15px;
+            margin: 15px 0;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        }
+
+        #mutual .stats-grid.stats-toggle-wrapper {
+            display: none;
+        }
+
+        #mutual .stats-grid.stats-toggle-wrapper.active {
+            display: grid;
+            gap: 15px;
+            margin: 15px 0;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        }
+
+        /* Booked profit section for Positional Trading re-enabled */
+
+        /* Mutual Fund - same hiding */
+        #mutual > .stats-grid {
+            display: none !important;
+        }
+
+        #mutual > hr {
+            display: none !important;
+        }
+
+        #mutual > .booked-heading {
+            display: none !important;
+        }
+
+        #mutual > div[id*="BookedTableWrapper"] {
+            display: none !important;
+        }
+
+        #mutual > div[style*="display:flex"] {
+            display: none !important;
+        }
+
+        #mutual > div.table-container:nth-of-type(2) {
+            display: none !important;
+        }
+
+        #mutual > canvas {
+            display: none !important;
+        }
+
+        #mutual .form-section:last-of-type {
+            display: none !important;
+        }
+
+        /* Table Dropdown Toggles */
+        .table-toggle-heading {
+            cursor: pointer;
+            user-select: none;
+            font-size: 16px;
+            font-weight: bold;
+            color: #1F4E78;
+            padding: 12px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 20px 0 10px 0;
+        }
+
+        .table-toggle-heading:hover {
+            color: #764ba2;
+        }
+
+        .table-toggle-icon {
+            display: inline-block;
+            font-size: 12px;
+            transition: transform 0.3s ease;
+        }
+
+        .table-toggle-icon.active {
+            transform: rotate(90deg);
+        }
+
+        .table-toggle-wrapper {
+            display: none;
+            margin: 15px 0;
+        }
+
+        .table-toggle-wrapper.active {
+            display: block;
+        }
+
+        .fd-alert-item {
+            background: linear-gradient(135deg, #fff5e6 0%, #ffe0b2 100%);
+            border-left: 5px solid #ff9800;
+            padding: 15px;
+            margin-bottom: 12px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(255, 152, 0, 0.2);
+        }
+
+        .fd-alert-item h4 {
+            color: #e65100;
+            margin: 0 0 8px 0;
+            font-size: 14px;
+        }
+
+        .fd-alert-item p {
+            color: #d84315;
+            margin: 5px 0;
+            font-size: 13px;
+        }
+
+        .fd-alert-item .days-left {
+            font-weight: bold;
+            color: #bf360c;
+            font-size: 14px;
+        }
+
+        .risk-alert-item {
+            background: linear-gradient(135deg, #ffe6e6 0%, #ffbaba 100%);
+            border-left: 5px solid #d32f2f;
+            padding: 15px;
+            margin-bottom: 12px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(211, 47, 47, 0.25);
+        }
+
+        .risk-alert-item h4 {
+            color: #b71c1c;
+            margin: 0 0 8px 0;
+            font-size: 15px;
+        }
+
+        .risk-alert-item p {
+            color: #c62828;
+            margin: 5px 0;
+            font-size: 13px;
+        }
+
+        .risk-alert-item .loss-amount {
+            font-weight: bold;
+            color: #b71c1c;
+            font-size: 15px;
+        }
+
+        .copy-preview {
+            display: none;
+            width: 100%;
+            min-height: 160px;
+            margin-top: 12px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            resize: vertical;
+        }
+
+        .pdf-fallback-link {
+            display: none;
+            margin-top: 10px;
+            font-size: 13px;
+            color: #1F4E78;
+            font-weight: bold;
+            text-decoration: underline;
+        }
+
+        .reports-column {
+            background: #f9f9f9;
+            border-radius: 10px;
+            padding: 20px;
+            max-width: 480px;
+        }
+
+        .reports-column h3 {
+            color: #1F4E78;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+
+        .reports-column p {
+            font-size: 13px;
+            color: #777;
+            margin-bottom: 15px;
+            line-height: 1.5;
+        }
+
+        .form-section {
+            background: #f9f9f9;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .form-section h3 {
+            color: #1F4E78;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+
+        .form-section h4 {
+            color: #764ba2;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        /* Buy (left) / Sell (right) side-by-side layout — always 2 columns, never stacks */
+        .buy-sell-columns {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 8px;
+            align-items: start;
+        }
+
+        .buy-sell-columns .form-section {
+            margin-bottom: 0;
+            padding: 8px;
+            min-width: 0;
+            overflow: hidden;
+        }
+
+        .buy-sell-columns .form-section h3 {
+            font-size: 12px;
+            margin-bottom: 8px;
+            overflow-wrap: break-word;
+        }
+
+        .buy-sell-columns .form-group {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .buy-sell-columns label {
+            font-size: 11px;
+            overflow-wrap: break-word;
+        }
+
+        .buy-sell-columns input,
+        .buy-sell-columns select {
+            padding: 6px;
+            font-size: 12px;
+            min-width: 0;
+            width: 100%;
+        }
+
+        .buy-sell-columns .button-group {
+            flex-direction: column;
+        }
+
+        .buy-sell-columns .button-group button {
+            width: 100%;
+            min-width: 0;
+            padding: 8px 4px;
+            font-size: 11px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+            font-size: 13px;
+        }
+
+        input, textarea, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+        }
+
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 5px rgba(102, 126, 234, 0.3);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+            grid-column: 1 / -1;
+        }
+
+        button {
+            background: linear-gradient(135deg, #1F4E78 0%, #2d5a96 100%);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            grid-column: 1 / -1;
+        }
+
+        .button-group button {
+            flex: 1;
+            min-width: 120px;
+        }
+
+        .export-btn {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            width: 100%;
+        }
+
+        .book-btn {
+            background: linear-gradient(135deg, #f7b733 0%, #fc4a1a 100%);
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+
+        .edit-btn {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            padding: 5px 10px;
+            font-size: 12px;
+            margin-right: 5px;
+        }
+
+        .cancel-btn {
+            background: #999;
+        }
+
+        .table-container {
+            overflow-x: auto;
+            margin-top: 20px;
+            margin-bottom: 25px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+        }
+
+        th {
+            background: #1F4E78;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: bold;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        tr:hover {
+            background: #f5f5f5;
+        }
+
+        .empty-row td {
+            text-align: center;
+            color: #999;
+            padding: 20px;
+        }
+
+        .delete-btn {
+            background: #ff6b6b;
+            padding: 5px 10px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .delete-btn:hover {
+            background: #ff5252;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+            margin-bottom: 25px;
+        }
+
+        .stat-box {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #1F4E78;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .stat-box h4 {
+            color: #666;
+            font-size: 12px;
+            margin-bottom: 8px;
+        }
+
+        .stat-box .number {
+            font-size: 24px;
+            font-weight: bold;
+            color: #1F4E78;
+        }
+
+        .section-divider {
+            border: none;
+            border-top: 2px dashed #ccd6e6;
+            margin: 25px 0;
+        }
+
+        .booked-heading {
+            color: #764ba2;
+            font-size: 13px;
+            margin-bottom: 6px;
+        }
+
+        .field-hint {
+            font-size: 11px;
+            color: #888;
+            margin-top: -10px;
+            margin-bottom: 12px;
+        }
+
+        .screenshot-thumb {
+            width: 42px;
+            height: 42px;
+            object-fit: cover;
+            border-radius: 6px;
+            cursor: pointer;
+            border: 1px solid #ddd;
+            display: block;
+        }
+
+        .screenshot-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.85);
+            z-index: 9999;
+            align-items: center;
+            justify-content: center;
+            cursor: zoom-out;
+        }
+
+        .screenshot-modal.active {
+            display: flex;
+        }
+
+        .screenshot-modal img {
+            max-width: 90%;
+            max-height: 90%;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+        }
+
+        .screenshot-modal-close {
+            position: absolute;
+            top: 18px;
+            right: 24px;
+            color: white;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .password-modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.6);
+            z-index: 10000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .password-modal-overlay.active {
+            display: flex;
+        }
+
+        .password-modal-box {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            max-width: 300px;
+            width: 90%;
+            text-align: center;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+        }
+
+        .password-modal-box h3 {
+            color: #1F4E78;
+            margin-bottom: 8px;
+            font-size: 17px;
+        }
+
+        .password-modal-box p {
+            color: #777;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+
+        .password-modal-box input {
+            text-align: center;
+            letter-spacing: 4px;
+            font-size: 18px;
+        }
+
+        body.dark-theme .password-modal-box {
+            background: #232334;
+        }
+
+        body.dark-theme .password-modal-box h3 {
+            color: #6fa8dc;
+        }
+
+        body.dark-theme .password-modal-box p {
+            color: #aaa;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                margin: 0;
+                border-radius: 0;
+            }
+
+            header h1 {
+                font-size: 15px;
+            }
+
+            .tab-button {
+                font-size: 9px;
+                min-width: 55px;
+                padding: 6px 2px;
+            }
+
+            .tab-content {
+                padding: 15px;
+            }
+
+            .form-group {
+                grid-template-columns: 1fr;
+            }
+
+            .filter-bar {
+                padding: 6px 8px 3px;
+            }
+        }
+        .theme-toggle-btn {
+            background: #1F4E78;
+            border: 1px solid #ccd6e6;
+            padding: 8px 14px;
+            font-size: 13px;
+            border-radius: 20px;
+            color: white;
+        }
+
+        .theme-toggle-btn:hover {
+            transform: none;
+            box-shadow: none;
+            opacity: 0.9;
+        }
+
+        /* ---------- Dark theme ---------- */
+        body.dark-theme {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16162a 100%);
+            color: #e0e0e0;
+        }
+
+        body.dark-theme .container {
+            background: #1e1e2e !important;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+        }
+
+        body.dark-theme header {
+            background: linear-gradient(135deg, #0f2942 0%, #163a5c 100%);
+        }
+
+        body.dark-theme .filter-bar {
+            background: rgba(255,255,255,0.05) !important;
+            border-top-color: rgba(255,255,255,0.15);
+        }
+
+        body.dark-theme .filter-bar .filter-label {
+            color: white;
+        }
+
+        body.dark-theme .filter-bar select {
+            color: #1F4E78;
+            border-color: #3a3a4e;
+        }
+
+        body.dark-theme .filter-range-label {
+            color: rgba(255,255,255,0.75);
+        }
+
+        body.dark-theme .tabs {
+            background: #1a1a26 !important;
+            border-bottom-color: #33334a;
+        }
+
+        body.dark-theme .tab-button {
+            color: #999;
+        }
+
+        body.dark-theme .tab-button:hover {
+            background: #26263a !important;
+        }
+
+        body.dark-theme .tab-button.active {
+            background: #1e1e2e !important;
+            color: #6fa8dc;
+            border-bottom-color: #6fa8dc;
+        }
+
+        body.dark-theme .sub-tabs {
+            background: #232334 !important;
+        }
+
+        body.dark-theme .sub-tab-button {
+            color: #bbb;
+        }
+
+        body.dark-theme .sub-tab-button:hover {
+            background: #2c2c44 !important;
+        }
+
+        body.dark-theme .sub-tab-button.active {
+            background: #1e1e2e !important;
+            color: #6fa8dc;
+            border-bottom-color: #9b7fd4;
+        }
+
+        body.dark-theme .reports-column,
+        body.dark-theme .form-section {
+            background: #232334 !important;
+        }
+
+        body.dark-theme .reports-column h3,
+        body.dark-theme .form-section h3 {
+            color: #6fa8dc;
+        }
+
+        body.dark-theme .reports-column p {
+            color: #aaa;
+        }
+
+        body.dark-theme .form-section h4 {
+            color: #b394e8;
+        }
+
+        body.dark-theme label {
+            color: #ddd;
+        }
+
+        body.dark-theme input,
+        body.dark-theme textarea,
+        body.dark-theme select {
+            background: #2a2a3c !important;
+            color: #eee !important;
+            border-color: #3a3a4e;
+        }
+
+        body.dark-theme input::placeholder,
+        body.dark-theme textarea::placeholder {
+            color: #888;
+        }
+
+        body.dark-theme table {
+            background: #232334 !important;
+        }
+
+        body.dark-theme th {
+            background: #12283f;
+        }
+
+        body.dark-theme td {
+            border-bottom-color: #33334a;
+        }
+
+        body.dark-theme tr:hover {
+            background: #2a2a3c !important;
+        }
+
+        body.dark-theme .empty-row td {
+            color: #888;
+        }
+
+        body.dark-theme .stat-box {
+            background: #232334 !important;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+
+        body.dark-theme .stat-box h4 {
+            color: #999;
+        }
+
+        body.dark-theme .stat-box .number {
+            color: #6fa8dc;
+        }
+
+        body.dark-theme .section-divider {
+            border-top-color: #3a3a4e;
+        }
+
+        body.dark-theme .booked-heading {
+            color: #b394e8;
+        }
+
+        body.dark-theme .field-hint {
+            color: #888;
+        }
+
+        body.dark-theme .pdf-fallback-link {
+            color: #6fa8dc;
+        }
+
+        body.dark-theme .copy-preview {
+            background: #2a2a3c;
+            color: #eee;
+            border-color: #3a3a4e;
+        }
+
+        body.dark-theme .chart-box {
+            background: #232334 !important;
+        }
+
+        body.dark-theme .fy-chart-heading,
+        body.dark-theme h3[style*="color:#1F4E78"],
+        body.dark-theme h4[style*="color:#1F4E78"] {
+            color: #6fa8dc !important;
+        }
+
+        body.dark-theme .theme-toggle-btn {
+            background: #6fa8dc;
+            border-color: #3a3a4e;
+            color: #1a1a2e;
+        }
+    </style>
+</head>
+<body>
+    <div class="container" id="mainContainer">
+        <header>
+            <h1>💼 DASHBOARD</h1>
+            <div class="timestamp" id="timestamp"></div>
+            <div class="load-status" id="loadStatus">Loading saved data…</div>
+
+            <div class="filter-bar">
+                <div class="filter-bar-row">
+                    <span class="filter-label">📅 Date Range:</span>
+                    <select id="rangeSelect" onchange="handleRangeChange()">
+                        <option value="all">All Time</option>
+                        <option value="this_year">This Year</option>
+                        <option value="latest_month" selected>Latest Month</option>
+                        <option value="last_month">Previous Month</option>
+                        <option value="last_3_months">Last 3 Months</option>
+                        <option value="last_6_months">Last 6 Months</option>
+                        <option value="last_year">Last Year</option>
+                        <option value="custom">Custom Range</option>
+                    </select>
+                </div>
+
+                <div class="custom-range" id="customRange">
+                    <label style="margin:0;font-weight:normal;">From <input type="date" id="customFrom"></label>
+                    <label style="margin:0;font-weight:normal;">To <input type="date" id="customTo"></label>
+                    <button onclick="applyCustomRange()">Apply</button>
+                </div>
+
+                <div class="filter-range-label" id="activeRangeLabel"></div>
+            </div>
+        </header>
+
+        <div class="tabs">
+            <button class="tab-button active" onclick="switchTab(event, 'overview')">📊 OVERVIEW</button>
+            <button class="tab-button" onclick="switchTab(event, 'journal')">📓 JOURNAL</button>
+            <button class="tab-button" onclick="switchTab(event, 'business')">🏭 BUSINESS</button>
+            <button class="tab-button" onclick="switchTab(event, 'expenses')">🏠 EXPENSES</button>
+            <button class="tab-button" onclick="switchTab(event, 'investment')">📈 INVESTMENT</button>
+            <button class="tab-button" onclick="switchTab(event, 'income')">💵 EXTERNAL INCOME</button>
+            <button class="tab-button" onclick="switchTab(event, 'export')">📤 OTHER</button>
+        </div>
+
+        <!-- OVERVIEW TAB -->
+        <div id="overview" class="tab-content active">
+            <div class="dashboard">
+                <div class="card positive">
+                    <h3>Business Profit</h3>
+                    <div class="value">₹<span id="businessProfit">0</span></div>
+                </div>
+                <div class="card positive">
+                    <h3>External Income</h3>
+                    <div class="value">₹<span id="otherIncomeOverview">0</span></div>
+                </div>
+                <div class="card negative">
+                    <h3>Expenses</h3>
+                    <div class="value">₹<span id="totalExpenses">0</span></div>
+                </div>
+                <div class="card" id="netPnLCard">
+                    <h3>NET P&L</h3>
+                    <div class="value">₹<span id="netPnL">0</span></div>
+                </div>
+            </div>
+
+            <hr class="section-divider">
+            <h3 style="color:#1F4E78;margin-bottom:15px;">🚨 Risk Alerts (Swing Trading — Latest Month)</h3>
+            <div id="riskAlertsContainer" style="display:none;">
+                <div id="riskAlertsList"></div>
+            </div>
+            <div id="riskAlertsEmpty" style="padding:15px;background:#f0f0f0;border-radius:8px;color:#666;">
+                <p>No risk limits breached</p>
+            </div>
+
+            <hr class="section-divider">
+            <h3 style="color:#1F4E78;margin-bottom:15px;">⏰ FD Maturity Alerts (within 3 days)</h3>
+            <div id="fdMaturityAlerts" style="display:none;">
+                <div id="fdMaturityList"></div>
+            </div>
+            <div id="fdMaturityEmpty" style="padding:15px;background:#f0f0f0;border-radius:8px;color:#666;">
+                <p>No FDs maturing within 3 days</p>
+            </div>
+        </div>
+
+        <!-- JOURNAL TAB (Daily habit / time tracker) -->
+        <div id="journal" class="tab-content">
+            <div class="form-section">
+                <h3 id="journalFormTitle">📝 Add Daily Entry</h3>
+                <div class="form-group">
+                    <div>
+                        <label>Date</label>
+                        <input type="date" id="journalDate">
+                    </div>
+                    <div>
+                        <label>Wasted Time — target ≤1 hrs</label>
+                        <input type="number" step="0.5" id="journalWasted" placeholder="0">
+                    </div>
+                    <div>
+                        <label>Educational Video — target 2 hrs</label>
+                        <input type="number" step="0.5" id="journalEduVideo" placeholder="0">
+                    </div>
+                    <div>
+                        <label>Reading Time — target 2 hrs</label>
+                        <input type="number" step="0.5" id="journalReading" placeholder="0">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div>
+                        <label>Sleeping Time — target 7 hrs</label>
+                        <input type="number" step="0.5" id="journalSleeping" placeholder="0">
+                    </div>
+                    <div>
+                        <label>MLA Daily TP — Main (target 21)</label>
+                        <input type="number" id="journalMla1" placeholder="0">
+                    </div>
+                    <div>
+                        <label>MLA Daily TP — Maha (target 1)</label>
+                        <input type="number" id="journalMla2" placeholder="0">
+                    </div>
+                    <div>
+                        <label>MLA Daily TP — T (target 10)</label>
+                        <input type="number" id="journalMla3" placeholder="0">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div>
+                        <label>Meditation - Morning — target 30 min</label>
+                        <input type="number" id="journalMed1" placeholder="0">
+                    </div>
+                    <div>
+                        <label>Meditation - Evening — target 30 min</label>
+                        <input type="number" id="journalMed2" placeholder="0">
+                    </div>
+                    <div>
+                        <label>Exercise - Morn. 20 Min- Eve. 20 Min</label>
+                        <input type="number" id="journalEx1" placeholder="0">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div>
+                        <label>Analysis Charts — target 1 hrs</label>
+                        <input type="number" step="0.5" id="journalAnalysis" placeholder="0">
+                    </div>
+                    <div style="grid-column: span 3;">
+                        <label>Notes/Reason</label>
+                        <input type="text" id="journalNotes" placeholder="How did today go?">
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button id="addJournalBtn" onclick="addJournalEntry()">➕ ADD ENTRY</button>
+                    <button id="cancelEditJournalBtn" class="cancel-btn" onclick="cancelEditJournal()" style="display:none;">✖ CANCEL EDIT</button>
+                </div>
+            </div>
+
+            <div class="table-toggle-heading" onclick="toggleTable('journalHoldings', event)">
+                <span class="table-toggle-icon" id="journalHoldingsToggleIcon">▶</span>
+                📊 Journal Entries
+            </div>
+
+            <div class="table-toggle-wrapper" id="journalHoldingsWrapper">
+
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <h4>Entries (this date range)</h4>
+                    <div class="number" id="journalCount">0</div>
+                </div>
+                <div class="stat-box">
+                    <h4>Avg Sleeping Time (hrs)</h4>
+                    <div class="number" id="journalAvgSleep">0</div>
+                </div>
+                <div class="stat-box">
+                    <h4>Avg Wasted Time (hrs)</h4>
+                    <div class="number" id="journalAvgWasted">0</div>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Wasted</th>
+                            <th>Edu Video</th>
+                            <th>Reading</th>
+                            <th>Sleep</th>
+                            <th>MLA-1</th>
+                            <th>MLA-2</th>
+                            <th>MLA-3</th>
+                            <th>Med-1</th>
+                            <th>Med-2</th>
+                            <th>Ex-1</th>
+                            <th>Analysis</th>
+                            <th>Notes</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="journalBody"></tbody>
+                </table>
+            </div>
+
+            </div>
+        </div>
+
+        <!-- BUSINESS TAB (Manual Monthly Net Profit) -->
+        <div id="business" class="tab-content">
+            <div class="form-section">
+                <h3 id="businessProfitFormTitle">📝 Add Monthly Net Profit</h3>
+                <div class="form-group">
+                    <div>
+                        <label>Month</label>
+                        <input type="month" id="businessProfitMonth">
+                    </div>
+                    <div>
+                        <label>Net Profit (₹)</label>
+                        <input type="number" id="businessProfitAmount" placeholder="15000">
+                    </div>
+                    <div>
+                        <label>Notes</label>
+                        <input type="text" id="businessProfitNotes" placeholder="Optional details">
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button id="addBusinessProfitBtn" onclick="addBusinessProfit()">➕ ADD NET PROFIT</button>
+                    <button id="cancelEditBusinessProfitBtn" class="cancel-btn" onclick="cancelEditBusinessProfit()" style="display:none;">✖ CANCEL EDIT</button>
+                </div>
+            </div>
+
+            <hr class="section-divider">
+
+            <h3 class="fy-chart-heading" style="color:#1F4E78;margin-bottom:15px;">📊 Fiscal Year Profit Chart & History (Apr - Mar)</h3>
+            <div class="form-group" style="max-width:260px;">
+                <div>
+                    <label>Fiscal Year</label>
+                    <select id="fiscalYearSelect" onchange="renderFiscalYearSection()"></select>
+                </div>
+            </div>
+            <div class="chart-box" style="background:white;border-radius:10px;padding:15px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:25px;">
+                <canvas id="profitChartCanvas" height="220"></canvas>
+            </div>
+
+            <div class="table-toggle-heading" onclick="toggleTable('businessHoldings', event)">
+                <span class="table-toggle-icon" id="businessHoldingsToggleIcon">▶</span>
+                📋 Monthly Net Profit History
+            </div>
+
+            <div class="table-toggle-wrapper" id="businessHoldingsWrapper">
+
+            <h3 style="color:#1F4E78;margin-bottom:15px;">📋 Monthly Net Profit History (selected Fiscal Year, all months)</h3>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Month</th>
+                            <th>Net Profit (₹)</th>
+                            <th>Notes</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="businessProfitBody"></tbody>
+                </table>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <h4>Entries (this Fiscal Year)</h4>
+                    <div class="number" id="businessProfitCount">0</div>
+                </div>
+                <div class="stat-box">
+                    <h4>Total Net Profit (this Fiscal Year)</h4>
+                    <div class="number" style="color: #11998e;">₹<span id="businessProfitTotal">0</span></div>
+                </div>
+            </div>
+
+            </div>
+        </div>
+
+
+        <!-- INVESTMENT TAB (formerly Stock Trading) -->
+        <div id="investment" class="tab-content">
+            <div class="sub-tabs">
+                <button class="sub-tab-button active" onclick="switchSubTab(event, 'investOverviewSub')">💼 Investment Overview</button>
+                <button class="sub-tab-button" onclick="switchSubTab(event, 'mutual')">🏦 Mutual Fund</button>
+                <button class="sub-tab-button" onclick="switchSubTab(event, 'positional')">📊 Positional Trading</button>
+                <button class="sub-tab-button" onclick="switchSubTab(event, 'fd')">🏛️ Fixed Deposit (FD)</button>
+            </div>
+
+            <div id="investOverviewSub" class="sub-tab-content active">
+                <h3 style="color:#1F4E78;margin-bottom:20px;">💼 Investment Overview</h3>
+                
+                <!-- Total Overview Only -->
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <h4>🏦 Mutual Fund Invested</h4>
+                        <div class="number">₹<span id="investOverviewMutual">0</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <h4>📊 Positional Trading Invested</h4>
+                        <div class="number">₹<span id="investOverviewPositional">0</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <h4>🏛️ Fixed Deposit Invested</h4>
+                        <div class="number">₹<span id="investOverviewFd">0</span></div>
+                    </div>
+                    <div class="stat-box" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                        <h4 style="color: white;">📈 Total Invested</h4>
+                        <div class="number" style="color: white;">₹<span id="investOverviewTotal">0</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="mutual" class="sub-tab-content"></div>
+            <div id="positional" class="sub-tab-content"></div>
+            <div id="fd" class="sub-tab-content"></div>
+        </div>
+
+        <!-- EXPENSES TAB -->
+        <div id="expenses" class="tab-content">
+            <div class="form-section">
+                <h3>📝 Add Expense</h3>
+                <div class="form-group">
+                    <div>
+                        <label>Date</label>
+                        <input type="date" id="expenseDate">
+                    </div>
+                    <div>
+                        <label>Amount (₹)</label>
+                        <input type="number" id="expenseAmount" placeholder="2000">
+                    </div>
+                    <div>
+                        <label>Category</label>
+                        <select id="expenseCategory">
+                            <option>Personal</option>
+                            <option>Family</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Notes</label>
+                        <input type="text" id="expenseNotes" placeholder="Details">
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button id="addExpenseBtn" onclick="addNewExpense()">➕ ADD EXPENSE</button>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Category</th>
+                            <th>Amount (₹)</th>
+                            <th>Notes</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="expensesBody"></tbody>
+                </table>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <h4>Total Expenses</h4>
+                    <div class="number">₹<span id="expensesTotal">0</span></div>
+                </div>
+                <div class="stat-box">
+                    <h4>Monthly Budget Limit</h4>
+                    <div class="number">₹<span id="expenseBudgetDisplay">20000</span></div>
+                </div>
+            </div>
+
+            <hr class="section-divider">
+            <h4 class="booked-heading">📊 Monthly Expenses Chart</h4>
+            <div class="form-section">
+                <h3>💰 Monthly Budget Limit</h3>
+                <div class="form-group">
+                    <div>
+                        <label>Fiscal Year</label>
+                        <select id="expenseChartYearSelect" onchange="renderExpensesChartSection()"></select>
+                    </div>
+                    <div>
+                        <label>Monthly Limit (₹)</label>
+                        <input type="number" id="expenseBudgetInput" placeholder="20000" value="20000">
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button id="saveExpenseBudgetBtn" onclick="setExpenseBudget()">💾 SAVE LIMIT</button>
+                </div>
+            </div>
+            <div style="position:relative;height:260px;margin-top:20px;">
+                <canvas id="expensesChartCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- EXTERNAL INCOME TAB -->
+        <div id="income" class="tab-content">
+            <div class="sub-tabs">
+                <button class="sub-tab-button active" onclick="switchSubTab(event, 'otherIncomeSub')">💵 General Income</button>
+                <button class="sub-tab-button" onclick="switchSubTab(event, 'swing')">📈 Swing Zerodha</button>
+                <button class="sub-tab-button" onclick="switchSubTab(event, 'swing2')">📈 Swing Delta Exchange</button>
+                <button class="sub-tab-button" onclick="switchSubTab(event, 'cash')">💵 Cash</button>
+            </div>
+
+            <div id="otherIncomeSub" class="sub-tab-content active">
+                <div class="form-section">
+                    <h3>📝 Add External Income</h3>
+                    <div class="form-group">
+                        <div>
+                            <label>Date</label>
+                            <input type="date" id="incomeDate">
+                        </div>
+                        <div>
+                            <label>Income Source</label>
+                            <input type="text" id="incomeSource" placeholder="e.g. Swing Zerodha, Freelance, Rental...">
+                        </div>
+                        <div>
+                            <label>Amount (₹)</label>
+                            <input type="number" id="incomeAmount" placeholder="5000">
+                        </div>
+                        <div>
+                            <label>Notes</label>
+                            <input type="text" id="incomeNotes" placeholder="Additional details">
+                        </div>
+                    </div>
+                    <div class="button-group">
+                        <button id="addIncomeBtn" onclick="addOtherIncome()">➕ ADD INCOME</button>
+                    </div>
+                </div>
+
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Source</th>
+                                <th>Amount (₹)</th>
+                                <th>Notes</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="incomeBody"></tbody>
+                    </table>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <h4>Total External Income</h4>
+                        <div class="number" style="color: #11998e;">₹<span id="incomeTotal">0</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="swing" class="sub-tab-content"></div>
+            <div id="swing2" class="sub-tab-content"></div>
+            <div id="cash" class="sub-tab-content"></div>
+        </div>
+
+
+        <!-- EXPORT TAB -->
+        <div id="export" class="tab-content">
+            <div class="reports-column">
+                <h3>📄 Download Report</h3>
+                <p>Generates a PDF of everything currently in range — the summary numbers plus every record in Business (monthly net profit), Investment (Mutual Fund/Positional Trading + FDs), External Income (including Swing Zerodha and Swing Delta Exchange), and Expenses. Change the date range filter above before generating if you want a different period.</p>
+                <button class="export-btn" id="downloadPdfBtn" onclick="downloadPdf()">📄 DOWNLOAD PDF</button>
+                <div id="pdfStatus" style="font-size:12px;margin-top:10px;"></div>
+                <a href="#" id="pdfFallbackLink" class="pdf-fallback-link" target="_blank" rel="noopener">⬇️ Click here to open/save the PDF</a>
+            </div>
+
+            <div class="reports-column" style="margin-top:20px;">
+                <h3>💻 Copy Data Code</h3>
+                <p>Copies the records currently in range — same date filter as above — as JSON code, so you can feed it into another tool or script.</p>
+                <button class="export-btn" id="copyCodeBtn" onclick="copyDataCode()">💻 COPY DATA CODE</button>
+                <div id="copyCodeStatus" style="font-size:12px;margin-top:10px;"></div>
+                <textarea class="copy-preview" id="copyCodePreview" readonly onclick="this.select()"></textarea>
+            </div>
+
+            <div class="reports-column" style="margin-top:20px;">
+                <h3>💾 Storage Used</h3>
+                <p>Roughly how much of the 5MB per-file storage limit your saved data is using. Screenshots take up the most room, so this is worth checking if you plan to save a lot of them.</p>
+                <button class="export-btn" id="checkStorageBtn" onclick="checkStorageUsage()">💾 CHECK STORAGE USED</button>
+                <div id="storageStatus" style="font-size:12px;margin-top:10px;"></div>
+            </div>
+
+            <div class="reports-column" style="margin-top:20px;">
+                <h3>📝 Saving Notes</h3>
+                <p>Jot down anything you want to remember — trading rules, reminders, ideas. Saved with the rest of your dashboard data.</p>
+                <input type="date" id="newNoteDate" style="margin-bottom:8px;">
+                <textarea id="newNoteText" placeholder="Write your note here..." style="min-height:100px;"></textarea>
+                <button class="export-btn" id="addNoteBtn" onclick="addNote()" style="margin-top:10px;">➕ ADD NOTE</button>
+                <div id="notesStatus" style="font-size:12px;margin-top:10px;"></div>
+
+                <div class="table-toggle-heading" onclick="toggleTable('notesHoldings', event)" style="margin-top:15px;">
+                    <span class="table-toggle-icon" id="notesHoldingsToggleIcon">▶</span>
+                    📋 View All Saved Notes
+                </div>
+                <div class="table-toggle-wrapper" id="notesHoldingsWrapper">
+                    <div id="savedNotesList"></div>
+                </div>
+            </div>
+
+            <div class="reports-column" style="margin-top:20px;">
+                <h3>🎨 Theme</h3>
+                <p>Switch between light and dark appearance for the whole dashboard.</p>
+                <button class="theme-toggle-btn" id="themeToggleBtn" onclick="toggleTheme()">🌙 Dark Mode</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Screenshot lightbox modal (used by Swing Trading screenshots) -->
+    <div class="screenshot-modal" id="screenshotModal" onclick="closeScreenshotModal()">
+        <span class="screenshot-modal-close">&times;</span>
+        <img id="screenshotModalImg" src="" alt="Trade screenshot">
+    </div>
+
+    <!-- Investment tab password lock modal -->
+    <div class="password-modal-overlay" id="investmentPasswordModal">
+        <div class="password-modal-box" onclick="event.stopPropagation()">
+            <h3>🔒 Investment Tab Locked</h3>
+            <p>Enter the password to continue</p>
+            <input type="password" id="investmentPasswordInput" placeholder="Password" inputmode="numeric" onkeydown="if(event.key==='Enter'){ event.preventDefault(); submitInvestmentPassword(); }">
+            <div id="investmentPasswordError" style="display:none;color:#eb3349;font-size:12px;margin-top:8px;">❌ Incorrect password</div>
+            <div class="button-group" style="margin-top:16px;">
+                <button onclick="submitInvestmentPassword()">🔓 Unlock</button>
+                <button class="cancel-btn" onclick="closeInvestmentPasswordModal()">✖ Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ---------- Data model ----------
+        let data = {
+            sales: [],
+            investments: {
+                swing: { holdings: [], booked: [], capital: 0, riskLimit: 0 },
+                swing2: { holdings: [], booked: [], capital: 0, riskLimit: 0 },
+                mutual: { holdings: [], booked: [] },
+                positional: { holdings: [], booked: [] }
+            },
+            fd: [],
+            cash: [],
+            income: [],
+            expenses: [],
+            expenseBudget: 20000,
+            businessProfit: [],
+            journal: [],
+            notes: []
+        };
+
+        const JOURNAL_TARGETS = {
+            wasted: 1, eduVideo: 2, reading: 2, sleeping: 7,
+            mla1: 21, mla2: 1, mla3: 10,
+            med1: 30, med2: 30, ex1: 30,
+            analysis: 1
+        };
+        let editingJournalId = null;
+        // Running total of accrued FD interest across all FDs, recomputed
+        // every time renderFdTable runs. Read by updateDashboard() so the
+        // Overview "Investment" card includes FD interest.
+        let fdMaturedInterestTotal = 0;
+        // Running total of cash entries, recomputed every time
+        // renderCashTable runs (used by the Cash section under External Income).
+        let cashTotalAmount = 0;
+
+        // Flat interest: full rate applied to invested amount immediately,
+        // no proration by elapsed days.
+        // interest = invested * (rate/100)
+        function computeFdInterest(fd, todayStr) {
+            if (!fd.createdDate || !fd.rate || !fd.invested) return 0;
+            return fd.invested * (fd.rate / 100);
+        }
+
+        const CATEGORY_LABEL = {
+            swing: 'Swing Zerodha',
+            swing2: 'Swing Delta Exchange',
+            mutual: 'Mutual Fund',
+            positional: 'Positional Trading'
+        };
+        const CATEGORIES = ['swing', 'swing2', 'mutual', 'positional'];
+        const SWING_CATEGORIES = ['swing', 'swing2'];
+        function isSwingCategory(cat) { return SWING_CATEGORIES.includes(cat); }
+
+        let rangeFilter = { type: 'latest_month', from: null, to: null };
+        const STORAGE_KEY = 'dashboard-data';
+        const THEME_STORAGE_KEY = 'dashboard-theme';
+        const CATEGORY_STORAGE_KEY = cat => 'dashboard-investments-' + cat;
+        let saveChain = Promise.resolve();
+        let profitChartInstance = null;
+        let categoryChartInstances = {};
+        let expensesChartInstance = null;
+        let editingBusinessProfitId = null;
+        let editingHolding = {};
+        let editingBooked = {};
+        let idCounter = 0;
+
+        function generateId() {
+            idCounter += 1;
+            return `${Date.now()}-${idCounter}`;
+        }
+
+        function escapeHtml(str) {
+            return String(str ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[ch]));
+        }
+
+        const pendingConfirms = {};
+        function confirmDelete(key, btnEl, onConfirm) {
+            if (pendingConfirms[key]) {
+                clearTimeout(pendingConfirms[key]);
+                delete pendingConfirms[key];
+                if (btnEl) {
+                    btnEl.textContent = 'DELETE';
+                    btnEl.style.background = '';
+                }
+                onConfirm();
+                return;
+            }
+
+            pendingConfirms[key] = setTimeout(() => {
+                delete pendingConfirms[key];
+                if (btnEl) {
+                    btnEl.textContent = 'DELETE';
+                    btnEl.style.background = '';
+                }
+            }, 3000);
+
+            if (btnEl) {
+                btnEl.textContent = 'CONFIRM?';
+                btnEl.style.background = '#c0392b';
+            }
+        }
+
+        function renderScreenshotCell(url, label) {
+            if (!url) return label ? `<div style="color:#aaa;font-size:11px;">${label}: -</div>` : '-';
+            const prefix = label ? `${label}: ` : '';
+            // Old records may still hold a compressed data: URL image - keep showing those as thumbnails.
+            if (url.indexOf('data:') === 0) {
+                return `<div>${prefix}<img class="screenshot-thumb" src="${url}" alt="${label || 'Trade'} screenshot" onclick="viewScreenshot('${url}')"></div>`;
+            }
+            return `<div style="font-size:12px;word-break:break-all;">${prefix}<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">🔗 Link</a></div>`;
+        }
+
+        function viewScreenshot(dataUrl) {
+            if (!dataUrl) return;
+            document.getElementById('screenshotModalImg').src = dataUrl;
+            document.getElementById('screenshotModal').classList.add('active');
+        }
+
+        function closeScreenshotModal() {
+            document.getElementById('screenshotModal').classList.remove('active');
+            document.getElementById('screenshotModalImg').src = '';
+        }
+
+        function readFileAsCompressedDataUrl(file, maxDim, quality) {
+            maxDim = maxDim || 700;
+            quality = quality || 0.72;
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    compressImageDataUrl(reader.result, maxDim, quality).then(resolve, reject);
+                };
+                reader.onerror = () => reject(reader.error || new Error('Could not read the selected file'));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        function compressImageDataUrl(srcDataUrl, maxDim, quality) {
+            maxDim = maxDim || 700;
+            quality = quality || 0.72;
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    let { width, height } = img;
+                    if (width > maxDim || height > maxDim) {
+                        if (width > height) {
+                            height = Math.round(height * (maxDim / width));
+                            width = maxDim;
+                        } else {
+                            width = Math.round(width * (maxDim / height));
+                            height = maxDim;
+                        }
+                    }
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+                    resolve(canvas.toDataURL('image/jpeg', quality));
+                };
+                img.onerror = () => reject(new Error('Could not load that image'));
+                img.src = srcDataUrl;
+            });
+        }
+
+        const pendingPasteScreenshot = {};
+
+        function loadImageFromUrl(cat) {
+            // Screenshot field just stores the URL as text - nothing is fetched or loaded.
+            const urlInput = document.getElementById(cat + 'ScreenshotUrl');
+            const statusEl = document.getElementById(cat + 'ScreenshotUrlStatus');
+            const url = urlInput ? urlInput.value.trim() : '';
+            if (statusEl) {
+                statusEl.textContent = url ? '✅ URL saved' : '';
+                statusEl.style.color = '#11998e';
+            }
+        }
+
+        async function resolveScreenshotFromField(urlFieldId, statusFieldId, pendingKey) {
+            // Just take whatever text is in the field - stored and shown as a link, never fetched.
+            const urlInput = document.getElementById(urlFieldId);
+            const url = urlInput ? urlInput.value.trim() : '';
+            return url || null;
+        }
+
+        async function checkStorageUsage() {
+            const statusEl = document.getElementById('storageStatus');
+            if (statusEl) { statusEl.textContent = 'Checking…'; statusEl.style.color = '#777'; }
+            try {
+                const json = JSON.stringify(data);
+                const bytes = new Blob([json]).size;
+                const mb = bytes / (1024 * 1024);
+                const pct = (bytes / (5 * 1024 * 1024)) * 100;
+                if (statusEl) {
+                    statusEl.textContent = `~${mb.toFixed(2)} MB used of 5 MB limit (${pct.toFixed(1)}%)`;
+                    statusEl.style.color = pct > 80 ? '#c0392b' : '#11998e';
+                }
+            } catch (err) {
+                console.error('Storage check failed:', err);
+                if (statusEl) { statusEl.textContent = '⚠️ Could not estimate storage usage'; statusEl.style.color = '#c0392b'; }
+            }
+        }
+
+        function migrateCategory(raw) {
+            if (raw && Array.isArray(raw.holdings) && Array.isArray(raw.booked)) {
+                if (typeof raw.capital !== 'number') raw.capital = 0;
+                if (typeof raw.riskLimit !== 'number') raw.riskLimit = 0;
+                raw.holdings.forEach(h => {
+                    if (typeof h.bookedQty !== 'number') h.bookedQty = 0;
+                    if (typeof h.buyPrice !== 'number') h.buyPrice = h.qty > 0 ? (h.invested || 0) / h.qty : (h.invested || 0);
+                });
+                raw.booked.forEach(b => {
+                    if (typeof b.buyPrice !== 'number') b.buyPrice = b.qty > 0 ? (b.invested || 0) / b.qty : (b.invested || 0);
+                    if (typeof b.sellPrice !== 'number') b.sellPrice = b.qty > 0 ? (b.bookedAmount || 0) / b.qty : (b.bookedAmount || 0);
+                });
+                return raw;
+            }
+
+            const holdings = [];
+            const booked = [];
+            if (Array.isArray(raw)) {
+                raw.forEach(r => {
+                    const qty = r.qty || 0;
+                    const buyPrice = qty > 0 ? (r.invested || 0) / qty : (r.invested || 0);
+                    if (r.status === 'booked') {
+                        const sellPrice = qty > 0 ? (r.bookedAmount || 0) / qty : (r.bookedAmount || 0);
+                        const lotId = r.id + '-lot';
+                        holdings.push({ id: lotId, date: r.date, name: r.name, buyPrice, qty, bookedQty: qty });
+                        booked.push({
+                            id: r.id,
+                            holdingId: lotId,
+                            name: r.name,
+                            buyPrice,
+                            qty,
+                            sellPrice,
+                            bookedDate: r.bookedDate,
+                            invested: r.invested,
+                            bookedAmount: r.bookedAmount
+                        });
+                    } else {
+                        holdings.push({ id: r.id, date: r.date, name: r.name, buyPrice, qty, bookedQty: 0 });
+                    }
+                });
+            }
+            return { holdings, booked, capital: 0 };
+        }
+
+        function applyTheme(theme) {
+            const btn = document.getElementById('themeToggleBtn');
+            if (theme === 'dark') {
+                document.body.classList.add('dark-theme');
+                if (btn) btn.textContent = '☀️ Light Mode';
+            } else {
+                document.body.classList.remove('dark-theme');
+                if (btn) btn.textContent = '🌙 Dark Mode';
+            }
+        }
+
+        async function toggleTheme() {
+            const isDark = document.body.classList.contains('dark-theme');
+            const newTheme = isDark ? 'light' : 'dark';
+            applyTheme(newTheme);
+            try {
+                await window.storage.set(THEME_STORAGE_KEY, newTheme, false);
+            } catch (error) {
+                console.error('Theme save error:', error);
+            }
+        }
+
+        async function loadTheme() {
+            try {
+                const result = await window.storage.get(THEME_STORAGE_KEY, false);
+                if (result && result.value) {
+                    applyTheme(result.value);
+                }
+            } catch (error) {
+                // No saved preference yet - default to light theme
+            }
+        }
+
+        async function loadData() {
+            const statusEl = document.getElementById('loadStatus');
+            try {
+                const result = await window.storage.get(STORAGE_KEY, false);
+                let parsed = {};
+                if (result && result.value) {
+                    parsed = JSON.parse(result.value);
+                    data = {
+                        sales: Array.isArray(parsed.sales) ? parsed.sales : [],
+                        investments: {
+                            swing: migrateCategory(parsed.investments?.swing),
+                            swing2: migrateCategory(parsed.investments?.swing2),
+                            mutual: migrateCategory(parsed.investments?.mutual),
+                            positional: migrateCategory(parsed.investments?.positional)
+                        },
+                        income: Array.isArray(parsed.income) ? parsed.income : [],
+                        expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
+                        expenseBudget: typeof parsed.expenseBudget === 'number' ? parsed.expenseBudget : 20000,
+                        fd: Array.isArray(parsed.fd) ? parsed.fd : [],
+                        cash: Array.isArray(parsed.cash) ? parsed.cash : [],
+                        businessProfit: Array.isArray(parsed.businessProfit) ? parsed.businessProfit : [],
+                        journal: Array.isArray(parsed.journal) ? parsed.journal : [],
+                        notes: Array.isArray(parsed.notes)
+                            ? parsed.notes
+                            : (typeof parsed.notes === 'string' && parsed.notes.trim() !== ''
+                                ? [{ id: Date.now(), date: new Date().toISOString().split('T')[0], text: parsed.notes }]
+                                : [])
+                    };
+                }
+
+                // Investment categories (which carry screenshots) live in their
+                // own storage keys so one bulky category can't block everything
+                // else from saving. If a category's own key has data, it wins
+                // over whatever was embedded in the core key above (legacy).
+                for (const cat of CATEGORIES) {
+                    try {
+                        const catResult = await window.storage.get(CATEGORY_STORAGE_KEY(cat), false);
+                        if (catResult && catResult.value) {
+                            data.investments[cat] = migrateCategory(JSON.parse(catResult.value));
+                        }
+                    } catch (catError) {
+                        console.error('Load error for category ' + cat + ':', catError);
+                    }
+                }
+
+                statusEl.textContent = '';
+            } catch (error) {
+                statusEl.textContent = '';
+            }
+            buildInvestmentSections();
+            buildFdSection();
+            buildCashSection();
+            initRangeFilter();
+            refreshAll();
+            initDates();
+            populateFiscalYearSelect();
+            renderFiscalYearSection();
+        }
+
+        function renderNow() {
+            refreshAll();
+        }
+
+        function setSaveStatus(text, isError) {
+            const statusEl = document.getElementById('loadStatus');
+            statusEl.textContent = text;
+            statusEl.style.color = isError ? '#ffd6d6' : '';
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        async function saveOnce(key, value) {
+            const attempts = [0, 500, 1500, 3000];
+            let lastError = null;
+            for (let i = 0; i < attempts.length; i++) {
+                if (attempts[i] > 0) await sleep(attempts[i]);
+                try {
+                    const result = await window.storage.set(key, value, false);
+                    if (result) return true;
+                    lastError = new Error('Storage set returned no result for ' + key);
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+            console.error('Storage error for ' + key + ':', lastError);
+            return false;
+        }
+
+        async function doSave() {
+            if (!window.storage || typeof window.storage.set !== 'function') {
+                console.error('window.storage is not available');
+                setSaveStatus('⚠️ Storage unavailable', true);
+                return;
+            }
+
+            setSaveStatus('Saving…', false);
+
+            // Investment categories (which can carry a lot of screenshot data)
+            // are saved to their own keys, separate from the core data, so a
+            // large category can't stop everything else from saving.
+            const coreData = {
+                sales: data.sales,
+                income: data.income,
+                expenses: data.expenses,
+                expenseBudget: data.expenseBudget,
+                fd: data.fd,
+                cash: data.cash,
+                businessProfit: data.businessProfit,
+                journal: data.journal,
+                notes: data.notes
+            };
+
+            const results = [];
+            results.push(await saveOnce(STORAGE_KEY, JSON.stringify(coreData)));
+            for (const cat of CATEGORIES) {
+                results.push(await saveOnce(CATEGORY_STORAGE_KEY(cat), JSON.stringify(data.investments[cat])));
+            }
+
+            if (results.every(r => r)) {
+                setSaveStatus('', false);
+            } else {
+                setSaveStatus('⚠️ Could not save — try removing a large screenshot', true);
+            }
+        }
+
+        function saveData() {
+            saveChain = saveChain.then(doSave).catch(err => console.error('Save error:', err));
+            return saveChain;
+        }
+
+        function initDates() {
+            const today = new Date().toISOString().split('T')[0];
+            const currentMonth = today.slice(0, 7);
+            if (document.getElementById('incomeDate')) document.getElementById('incomeDate').value = today;
+            if (document.getElementById('expenseDate')) document.getElementById('expenseDate').value = today;
+            if (document.getElementById('businessProfitMonth')) document.getElementById('businessProfitMonth').value = currentMonth;
+            if (document.getElementById('journalDate')) document.getElementById('journalDate').value = today;
+            if (document.getElementById('newNoteDate')) document.getElementById('newNoteDate').value = today;
+            CATEGORIES.forEach(cat => {
+                const dateEl = document.getElementById(cat + 'Date');
+                if (dateEl) dateEl.value = today;
+                const bookedDateEl = document.getElementById(cat + 'BookedDate');
+                if (bookedDateEl) bookedDateEl.value = today;
+            });
+        }
+
+        function toISODate(d) {
+            return d.toISOString().split('T')[0];
+        }
+
+        function computePresetRange(type) {
+            const today = new Date();
+            const to = toISODate(today);
+            const start = new Date(today);
+
+            if (type === 'latest_month') {
+                start.setDate(1);
+            } else if (type === 'this_year') {
+                return { from: toISODate(new Date(today.getFullYear(), 0, 1)), to };
+            } else if (type === 'last_month') {
+                const prevMonthStart = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+                const prevMonthEnd = new Date(today.getFullYear(), today.getMonth(), 0);
+                return { from: toISODate(prevMonthStart), to: toISODate(prevMonthEnd) };
+            } else if (type === 'last_3_months') {
+                start.setMonth(start.getMonth() - 3);
+            } else if (type === 'last_6_months') {
+                start.setMonth(start.getMonth() - 6);
+            } else if (type === 'last_year') {
+                start.setFullYear(start.getFullYear() - 1);
+            } else {
+                return { from: null, to: null };
+            }
+            return { from: toISODate(start), to };
+        }
+
+        function initRangeFilter() {
+            const { from, to } = computePresetRange('latest_month');
+            rangeFilter = { type: 'latest_month', from, to };
+            updateRangeLabel();
+        }
+
+        function handleRangeChange() {
+            const type = document.getElementById('rangeSelect').value;
+            const customRangeEl = document.getElementById('customRange');
+
+            if (type === 'custom') {
+                customRangeEl.classList.add('active');
+                return;
+            }
+
+            customRangeEl.classList.remove('active');
+
+            if (type === 'all') {
+                rangeFilter = { type: 'all', from: null, to: null };
+            } else {
+                const { from, to } = computePresetRange(type);
+                rangeFilter = { type, from, to };
+            }
+
+            updateRangeLabel();
+            refreshAll();
+        }
+
+        function applyCustomRange() {
+            const from = document.getElementById('customFrom').value;
+            const to = document.getElementById('customTo').value;
+
+            if (!from || !to) {
+                alert('❌ Please choose both a From and a To date');
+                return;
+            }
+            if (from > to) {
+                alert('❌ The "From" date must be before the "To" date');
+                return;
+            }
+
+            rangeFilter = { type: 'custom', from, to };
+            updateRangeLabel();
+            refreshAll();
+        }
+
+        function updateRangeLabel() {
+            const label = document.getElementById('activeRangeLabel');
+            if (rangeFilter.type === 'all') {
+                label.textContent = '';
+            } else {
+                label.textContent = `Showing records from ${rangeFilter.from} to ${rangeFilter.to}`;
+            }
+        }
+
+        function inRange(dateStr) {
+            if (rangeFilter.type === 'all') return true;
+            if (!dateStr) return false;
+            return dateStr >= rangeFilter.from && dateStr <= rangeFilter.to;
+        }
+
+        function getFiltered(records) {
+            return records.filter(r => inRange(r.date));
+        }
+
+        function getAllFiltered() {
+            const investmentsFiltered = {};
+            CATEGORIES.forEach(cat => {
+                const open = data.investments[cat].holdings.filter(r => (r.qty - (r.bookedQty || 0)) > 1e-9 && inRange(r.date));
+                const booked = data.investments[cat].booked.filter(r => inRange(r.bookedDate));
+                investmentsFiltered[cat] = { open, booked };
+            });
+            return {
+                sales: getFiltered(data.sales),
+                investments: investmentsFiltered,
+                income: getFiltered(data.income),
+                expenses: getFiltered(data.expenses),
+                businessProfit: getFiltered(data.businessProfit),
+                journal: getFiltered(data.journal)
+            };
+        }
+
+        async function addBusinessProfit() {
+            const month = document.getElementById('businessProfitMonth').value;
+            const amount = parseFloat(document.getElementById('businessProfitAmount').value);
+            const notes = document.getElementById('businessProfitNotes').value.trim();
+
+            if (!month || isNaN(amount)) {
+                alert('❌ Please select a month and enter a net profit amount');
+                return;
+            }
+
+            const btn = document.getElementById('addBusinessProfitBtn');
+            btn.disabled = true;
+
+            if (editingBusinessProfitId !== null) {
+                const entry = data.businessProfit.find(r => String(r.id) === String(editingBusinessProfitId));
+                if (entry) {
+                    entry.date = month + '-01';
+                    entry.month = month;
+                    entry.amount = amount;
+                    entry.notes = notes;
+                }
+                cancelEditBusinessProfit();
+            } else {
+                data.businessProfit.push({
+                    id: generateId(),
+                    date: month + '-01',
+                    month,
+                    amount,
+                    notes
+                });
+            }
+
+            renderNow();
+            await saveData();
+            populateFiscalYearSelect();
+            selectFiscalYearFor(month);
+            renderFiscalYearSection();
+            document.getElementById('businessProfitAmount').value = '';
+            document.getElementById('businessProfitNotes').value = '';
+            btn.disabled = false;
+        }
+
+        function editBusinessProfit(id) {
+            const entry = data.businessProfit.find(r => String(r.id) === String(id));
+            if (!entry) return;
+
+            editingBusinessProfitId = id;
+            document.getElementById('businessProfitMonth').value = entry.month;
+            document.getElementById('businessProfitAmount').value = entry.amount;
+            document.getElementById('businessProfitNotes').value = entry.notes || '';
+
+            document.getElementById('businessProfitFormTitle').textContent = '✏️ Edit Monthly Net Profit';
+            document.getElementById('addBusinessProfitBtn').textContent = '💾 UPDATE NET PROFIT';
+            document.getElementById('cancelEditBusinessProfitBtn').style.display = '';
+
+            document.getElementById('businessProfitMonth').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function cancelEditBusinessProfit() {
+            editingBusinessProfitId = null;
+            document.getElementById('businessProfitFormTitle').textContent = '📝 Add Monthly Net Profit';
+            document.getElementById('addBusinessProfitBtn').textContent = '➕ ADD NET PROFIT';
+            document.getElementById('cancelEditBusinessProfitBtn').style.display = 'none';
+            document.getElementById('businessProfitAmount').value = '';
+            document.getElementById('businessProfitNotes').value = '';
+            const currentMonth = new Date().toISOString().split('T')[0].slice(0, 7);
+            document.getElementById('businessProfitMonth').value = currentMonth;
+        }
+
+        async function deleteBusinessProfit(id, btnEl) {
+            confirmDelete('bp-' + id, btnEl, async () => {
+                data.businessProfit = data.businessProfit.filter(r => String(r.id) !== String(id));
+                if (editingBusinessProfitId !== null && String(editingBusinessProfitId) === String(id)) {
+                    cancelEditBusinessProfit();
+                }
+                renderNow();
+                await saveData();
+                populateFiscalYearSelect();
+                renderFiscalYearSection();
+            });
+        }
+
+        function renderBusinessProfitTable(rows) {
+            const tbody = document.getElementById('businessProfitBody');
+            if (!tbody) return;
+
+            if (rows.length === 0) {
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="4">No entries in this fiscal year</td></tr>';
+            } else {
+                const sorted = [...rows].sort((a, b) => b.date.localeCompare(a.date));
+                tbody.innerHTML = sorted.map(r => `
+                    <tr>
+                        <td>${escapeHtml(r.month)}</td>
+                        <td style="color:${r.amount >= 0 ? '#11998e' : '#ff6b6b'}">₹${r.amount.toFixed(2)}</td>
+                        <td>${escapeHtml(r.notes)}</td>
+                        <td>
+                            <button class="edit-btn" onclick="editBusinessProfit('${r.id}')">EDIT</button>
+                            <button class="delete-btn" onclick="deleteBusinessProfit('${r.id}', this)">DELETE</button>
+                        </td>
+                    </tr>
+                `).join('');
+            }
+
+            const count = rows.length;
+            const total = rows.reduce((s, r) => s + r.amount, 0);
+            const countEl = document.getElementById('businessProfitCount');
+            const totalEl = document.getElementById('businessProfitTotal');
+            if (countEl) countEl.textContent = count;
+            if (totalEl) totalEl.textContent = total.toFixed(2);
+        }
+
+        function journalFieldIds() {
+            return ['journalWasted','journalEduVideo','journalReading','journalSleeping','journalMla1','journalMla2','journalMla3','journalMed1','journalMed2','journalEx1','journalAnalysis'];
+        }
+
+        function num(val) {
+            const n = parseFloat(val);
+            return isNaN(n) ? 0 : n;
+        }
+
+        async function addJournalEntry() {
+            const date = document.getElementById('journalDate').value;
+            if (!date) {
+                alert('❌ Please select a date');
+                return;
+            }
+
+            const btn = document.getElementById('addJournalBtn');
+            btn.disabled = true;
+
+            const entry = {
+                date,
+                wasted: num(document.getElementById('journalWasted').value),
+                eduVideo: num(document.getElementById('journalEduVideo').value),
+                reading: num(document.getElementById('journalReading').value),
+                sleeping: num(document.getElementById('journalSleeping').value),
+                mla1: num(document.getElementById('journalMla1').value),
+                mla2: num(document.getElementById('journalMla2').value),
+                mla3: num(document.getElementById('journalMla3').value),
+                med1: num(document.getElementById('journalMed1').value),
+                med2: num(document.getElementById('journalMed2').value),
+                ex1: num(document.getElementById('journalEx1').value),
+                analysis: num(document.getElementById('journalAnalysis').value),
+                notes: document.getElementById('journalNotes').value.trim()
+            };
+
+            if (editingJournalId !== null) {
+                const existing = data.journal.find(r => String(r.id) === String(editingJournalId));
+                if (existing) Object.assign(existing, entry);
+                cancelEditJournal();
+            } else {
+                entry.id = generateId();
+                data.journal.push(entry);
+            }
+
+            renderNow();
+            await saveData();
+            document.getElementById('journalNotes').value = '';
+            journalFieldIds().forEach(id => { document.getElementById(id).value = ''; });
+            btn.disabled = false;
+        }
+
+        function editJournalEntry(id) {
+            const entry = data.journal.find(r => String(r.id) === String(id));
+            if (!entry) return;
+
+            editingJournalId = id;
+            document.getElementById('journalDate').value = entry.date;
+            document.getElementById('journalWasted').value = entry.wasted;
+            document.getElementById('journalEduVideo').value = entry.eduVideo;
+            document.getElementById('journalReading').value = entry.reading;
+            document.getElementById('journalSleeping').value = entry.sleeping;
+            document.getElementById('journalMla1').value = entry.mla1;
+            document.getElementById('journalMla2').value = entry.mla2;
+            document.getElementById('journalMla3').value = entry.mla3;
+            document.getElementById('journalMed1').value = entry.med1;
+            document.getElementById('journalMed2').value = entry.med2;
+            document.getElementById('journalEx1').value = entry.ex1;
+            document.getElementById('journalAnalysis').value = entry.analysis;
+            document.getElementById('journalNotes').value = entry.notes || '';
+
+            document.getElementById('journalFormTitle').textContent = '✏️ Edit Daily Entry';
+            document.getElementById('addJournalBtn').textContent = '💾 UPDATE ENTRY';
+            document.getElementById('cancelEditJournalBtn').style.display = '';
+            document.getElementById('journalDate').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function cancelEditJournal() {
+            editingJournalId = null;
+            document.getElementById('journalFormTitle').textContent = '📝 Add Daily Entry';
+            document.getElementById('addJournalBtn').textContent = '➕ ADD ENTRY';
+            document.getElementById('cancelEditJournalBtn').style.display = 'none';
+            document.getElementById('journalNotes').value = '';
+            journalFieldIds().forEach(id => { document.getElementById(id).value = ''; });
+            document.getElementById('journalDate').value = new Date().toISOString().split('T')[0];
+        }
+
+        async function deleteJournalEntry(id, btnEl) {
+            confirmDelete('journal-' + id, btnEl, async () => {
+                data.journal = data.journal.filter(r => String(r.id) !== String(id));
+                if (editingJournalId !== null && String(editingJournalId) === String(id)) {
+                    cancelEditJournal();
+                }
+                renderNow();
+                await saveData();
+            });
+        }
+
+        function metricCellColor(value, target, invert) {
+            const met = invert ? value <= target : value >= target;
+            return met ? '#11998e' : '#ff6b6b';
+        }
+
+        function renderJournalTable(rows) {
+            const tbody = document.getElementById('journalBody');
+            if (!tbody) return;
+
+            if (rows.length === 0) {
+                tbody.innerHTML = '<tr class="empty-row"><td colspan="14">No journal entries in this range</td></tr>';
+            } else {
+                const sorted = [...rows].sort((a, b) => b.date.localeCompare(a.date));
+                tbody.innerHTML = sorted.map(r => `
+                    <tr>
+                        <td>${escapeHtml(r.date)}</td>
+                        <td style="color:${metricCellColor(r.wasted, JOURNAL_TARGETS.wasted, true)}">${r.wasted}</td>
+                        <td style="color:${metricCellColor(r.eduVideo, JOURNAL_TARGETS.eduVideo, false)}">${r.eduVideo}</td>
+                        <td style="color:${metricCellColor(r.reading, JOURNAL_TARGETS.reading, false)}">${r.reading}</td>
+                        <td style="color:${metricCellColor(r.sleeping, JOURNAL_TARGETS.sleeping, false)}">${r.sleeping}</td>
+                        <td style="color:${metricCellColor(r.mla1, JOURNAL_TARGETS.mla1, false)}">${r.mla1}</td>
+                        <td style="color:${metricCellColor(r.mla2, JOURNAL_TARGETS.mla2, false)}">${r.mla2}</td>
+                        <td style="color:${metricCellColor(r.mla3, JOURNAL_TARGETS.mla3, false)}">${r.mla3}</td>
+                        <td style="color:${metricCellColor(r.med1, JOURNAL_TARGETS.med1, false)}">${r.med1}</td>
+                        <td style="color:${metricCellColor(r.med2, JOURNAL_TARGETS.med2, false)}">${r.med2}</td>
+                        <td style="color:${metricCellColor(r.ex1, JOURNAL_TARGETS.ex1, false)}">${r.ex1}</td>
+                        <td style="color:${metricCellColor(r.analysis, JOURNAL_TARGETS.analysis, false)}">${r.analysis}</td>
+                        <td>${escapeHtml(r.notes)}</td>
+                        <td>
+                            <button class="edit-btn" onclick="editJournalEntry('${r.id}')">EDIT</button>
+                            <button class="delete-btn" onclick="deleteJournalEntry('${r.id}', this)">DELETE</button>
+                        </td>
+                    </tr>
+                `).join('');
+            }
+
+            const count = rows.length;
+            const avg = (key) => count > 0 ? (rows.reduce((s, r) => s + r[key], 0) / count) : 0;
+
+            const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+            set('journalCount', count);
+            set('journalAvgSleep', avg('sleeping').toFixed(1));
+            set('journalAvgWasted', avg('wasted').toFixed(1));
+        }
+
+        function getFiscalYearStart(dateStr) {
+            const [y, m] = dateStr.split('-').map(Number);
+            return m >= 4 ? y : y - 1;
+        }
+
+        function fiscalYearLabel(fyStart) {
+            return `${fyStart}-${String(fyStart + 1).slice(2)}`;
+        }
+
+        function populateFiscalYearSelect() {
+            const select = document.getElementById('fiscalYearSelect');
+            if (!select) return;
+            const currentValue = select.value;
+
+            const years = new Set();
+            data.businessProfit.forEach(r => years.add(getFiscalYearStart(r.date)));
+            years.add(getFiscalYearStart(toISODate(new Date())));
+
+            const sorted = Array.from(years).sort((a, b) => b - a);
+            select.innerHTML = sorted.map(fy => `<option value="${fy}">${fiscalYearLabel(fy)}</option>`).join('');
+
+            if (currentValue && sorted.some(fy => String(fy) === currentValue)) {
+                select.value = currentValue;
+            }
+        }
+
+        function selectFiscalYearFor(month) {
+            const select = document.getElementById('fiscalYearSelect');
+            if (!select || !month) return;
+            const fyStart = getFiscalYearStart(month + '-01');
+            if ([...select.options].some(o => o.value === String(fyStart))) {
+                select.value = String(fyStart);
+            }
+        }
+
+        function getBusinessProfitForFiscalYear(fyStart) {
+            return data.businessProfit.filter(r => getFiscalYearStart(r.date) === fyStart);
+        }
+
+        function renderFiscalYearSection() {
+            renderProfitChart();
+
+            const select = document.getElementById('fiscalYearSelect');
+            if (!select || !select.value) {
+                renderBusinessProfitTable([]);
+                return;
+            }
+            const fyStart = parseInt(select.value, 10);
+            if (isNaN(fyStart)) {
+                renderBusinessProfitTable([]);
+                return;
+            }
+            renderBusinessProfitTable(getBusinessProfitForFiscalYear(fyStart));
+        }
+
+        function renderProfitChart() {
+            const select = document.getElementById('fiscalYearSelect');
+            const canvas = document.getElementById('profitChartCanvas');
+            if (!select || !canvas || !select.value) return;
+
+            const fyStart = parseInt(select.value, 10);
+            if (isNaN(fyStart)) return;
+
+            if (!window.Chart) {
+                con
